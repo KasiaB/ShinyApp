@@ -1,11 +1,12 @@
 library(shiny)
 library(dplyr)
 library(ggplot2)
+con <- url("https://github.com/KasiaB/ShinyApp/raw/gh-pages/MovementSensors/data_plot.RData")
+load(con)
 
 shinyServer(function(input, output) {
    
   output$chosenPlot <- renderPlot({
-      load(url("https://github.com/KasiaB/ShinyApp/raw/gh-pages/MovementSensors/data_plot.RData"))
       dataset <- sample_n(data_plot,input$n)
       plot_choice <- switch(input$plot_choice,
                             full={

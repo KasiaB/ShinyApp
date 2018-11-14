@@ -1,21 +1,9 @@
-#
-# This is the user-interface definition of a Shiny web application. You can
-# run the application by clicking 'Run App' above.
-#
-# Find out more about building applications with Shiny here:
-# 
-#    http://shiny.rstudio.com/
-#
-
 library(shiny)
+con <- url("https://github.com/KasiaB/ShinyApp/raw/gh-pages/MovementSensors/data_plot.RData")
+load(con)
 
-# Define UI for application that draws a histogram
 shinyUI(fluidPage(
-  
-  # Application title
   titlePanel("Movement Sensors in Prediction of Accuracy of Exercise Quality"),
-  
-  # Sidebar with a slider input for number of bins 
   sidebarLayout(
       sidebarPanel(
           sliderInput("n", "Choose the number of datapoints to plot:", 0, nrow(data_plot), nrow(data_plot)),
