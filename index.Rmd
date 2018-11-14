@@ -1,0 +1,295 @@
+---
+title: "Automated Prediction of Athletic Exercise Quality based on readings from Movement Sensors"
+author: "Katarzyna Bojarska"
+date: "2018 11 13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = T, echo = T, warning = F,message = F)
+```
+
+## Executive Summary  
+The aim of the project is to compare the goodness of predictions of the manner in which 6 athletes did the Unilateral Dumbbell Biceps Curl, based on the readings from either four or from a single movement sensor, depending on its location (on the belt, forearm, arm, or dumbell).  
+The athletes were asked to perform one set of 10 repetitions of the exercise in five different ways: exactly according to the specification or making one of 4 common mistakes (5 classes of exercise quality, A, B, C, D and E, where A refers to the correct way of performing the Biceps Curl).  
+The original study involved prediction from all the sensors and provided highly accurate predictions (of over 99.5%).  
+We now want to focus on the accuracy of predictions from single movement sensors.  
+More information about the original study is available from the website here: <http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).  
+
+## Preparation of the dataset  
+```{r preparation}
+#load the libraries
+library(caret); library(dplyr); library(randomForest); library(doParallel); library(ggplot2)
+#load the training and testing data
+if(!file.exists("./pml-training.csv")) {
+    fileUrl1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+    download.file(fileUrl1, destfile = "./pml-training.csv")}
+#name the training and testing datasets
+training = read.csv("pml-training.csv")
+#display the properties of the dataset
+names(training)
+```
+
+The initial dataset consisted of `r dim(training)[1]` observations of `r dim(training)[2]` variables. Beside index, user identification and time related data specific for individual users, the dataset contained three-dimensional raw data from accelerometer, gyroscope and magnetometer - sensors mounted in the users' glove, armband, lumbar belt and dumbbell. The researchers calculated also eight features: mean, variance, standard deviation, max, min, amplitude, kurtosis and skewness for the Euler angles of each of the four sensors, generating in total 96 derived feature sets. Most of the derived variables were later excluded from the analysis because of large amount of missing data. The dependent variable was the manner in which the athletes performed the exercise: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). 
+
+```{r cleaning}
+#identify the number of missing values for each variable
+missingi <- data.frame(mis = sapply(training, function(x) sum(is.na(x))))
+#calculate the proportion of missing values for each variable
+missingi$procmis <- round(missingi$mis/nrow(training),3)
+#display all levels of proportions of missing values
+table(missingi$procmis)
+#exclude variables with high amount of missing values from the dataset
+training <- training[,missingi$mis==0]
+#identify variables with near zero variance
+nzv_an <- nearZeroVar(training,saveMetrics = T)
+#exclude variables with near zero variance
+training <- training[,nzv_an$nzv=="FALSE"]
+new <- training[,-c(1:6)]
+#split the dataset for training and testing
+inTrain <- createDataPartition(y=new$classe,p=0.8, list=FALSE)
+train <- new[inTrain,];
+test <- new[-inTrain,]
+```
+
+`r table(missingi$procmis)[1]` variables contained no missing values, while the remaining `r table(missingi$procmis)[2]` variables contained each exactly `r unique(missingi$mis)[2]` missing values out of `r nrow(training)` observations (`r round(unique(missingi$procmis),4)[2]*100`%). The latter were excluded from the dataset. The next step was to exclude variables with near zero variance. Finally, we excluded several user specific variables that wouldn't be suitable for prediction, such as names of the participants, row numbers and time stamps. The final dataset contained `r dim(new)[2]` variables, including one categorical, 5-level dependent variable, "classe", and 52 potential predictors, of which `r sum(data.frame(sapply(train,is.integer))[,1])` were integer and `r ncol(train)-sum(data.frame(sapply(train,is.integer))[,1])-sum(data.frame(sapply(train,is.factor))[,1])` were numeric.. It was then split into a training and testing subset, consisting of `r dim(train)[1]` and `r dim(test)[1]` observations, reslectively.  
+
+```{r expl_table}
+#display frequencies for the levels of dependent variable in the train dataset
+table(train$classe)
+```
+
+Next we prepared 4 separate datasets for each movement sensor. Each dataset contained the dependent variable and a set of predictors associated with only one sensor.
+
+```{r sensors_sets}
+forearm <- grepl("forearm",names(new))
+forearm_train <- cbind(train[,forearm],classe = train$classe)
+forearm_test <- cbind(test[,forearm],classe = test$classe)
+
+arm <- grepl("_arm",names(new))
+arm_train <- cbind(train[,arm],classe = train$classe)
+arm_test <- cbind(test[,arm],classe = test$classe)
+
+belt <- grepl("belt",names(new))
+belt_train <- cbind(train[,belt],classe = train$classe)
+belt_test <- cbind(test[,belt],classe = test$classe)
+
+dumbbell <- grepl("dumbbell",names(new))
+dumbbell_train <- cbind(train[,dumbbell],classe = train$classe)
+dumbbell_test <- cbind(test[,dumbbell],classe = test$classe)
+```
+
+## Full model fitting and testing  
+Our first choice to predict categorical dependent variable by numeric predictors was the random forest classification method. Random forest is an extension of bagging on classification/regression trees. It involves repeated bootstraping samples, testing various splits of classification trees and voting final model. This method doesn't require data normalization or log transformations and performs internal validation to assess OOB error. First, we run the procedure on the entire dataset containing readings from all four sensors.
+
+```{r training_rf}
+#enable parallel processing
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+#fit the random forest model on the training dataset
+rf<-randomForest(train$classe ~ ., data=train, prox=TRUE, ntree=500)
+rf
+```
+
+The procedure was capable of correctly classifying around 99.5% of the observations from the dataset. The estimated rate of OOB error was below 0.5%.  
+The importance of the predictor variables is listed and plotted below.
+
+```{r importance}
+#display the variable importance
+vimp <- as.data.frame(varImp(rf))
+vimp <- data.frame(names   = rownames(vimp),overall = vimp$Overall)
+vimp <- vimp[order(vimp$overall,decreasing = T),]
+vimp
+#plot ten most important variables
+p <- ggplot(vimp[1:10,], aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=30,vjust=.8, hjust=0.8)) + ggtitle("Plot of variable importance descending (ten most important variables)") +
+  xlab("Variable name") + ylab("Variable importance")
+p
+#plot all the variables ordered by importance
+p1 <- ggplot(vimp, aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=45,vjust=.8, hjust=0.8)) + ggtitle("Plot of variable importance descending") +
+  xlab("Variable name") + ylab("Variable importance")
+p1
+```
+
+As we can see, the variables which contributed to the model the most, were mostly readings from belt and dumbbell devices, followed by the sensors attached to the forarm. Sensors mounted on the athlete's arm were apparently of lesser importance.
+
+## Testing predictions from separate sensors
+We then ran the same random forest classification procedure on each of the four separate datasets.  
+
+```{r training_rf_4sensors}
+#fit the random forest model on the four training datasets
+rf_forearm <-randomForest(forearm_train$classe ~ ., data=forearm_train, prox=TRUE, ntree=500)
+rf_forearm
+
+rf_arm <-randomForest(arm_train$classe ~ ., data=arm_train, prox=TRUE, ntree=500)
+rf_arm
+
+rf_belt <-randomForest(belt_train$classe ~ ., data=belt_train, prox=TRUE, ntree=500)
+rf_belt
+
+rf_dumbbell <-randomForest(dumbbell_train$classe ~ ., data=dumbbell_train, prox=TRUE, ntree=500)
+rf_dumbbell
+```
+
+The accuracy of predictions dropped considerably. The procedure was now capable of correctly classifying only from around 88% (arm), 89% (dumbbell), 91% (forearm) to around 92% (belt) of the observations from the training dataset. The estimated rate of OOB error was from over 11% to around 8%.  
+The importance of the predictor variables for each sensor is listed and plotted below.
+
+```{r importance_forearm}
+#display the variable importance for the forearm sensor
+vimp_forearm <- as.data.frame(varImp(rf_forearm))
+vimp_forearm <- data.frame(names   = rownames(vimp_forearm),overall = vimp_forearm$Overall)
+vimp_forearm <- vimp_forearm[order(vimp_forearm$overall,decreasing = T),]
+vimp_forearm
+#plot ten most important variables for the forearm sensor
+p_forearm <- ggplot(vimp_forearm[1:10,], aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=30,vjust=.8, hjust=0.8)) + ggtitle("Ten most important variables (forearm sensor)") +
+  xlab("Variable name") + ylab("Variable importance")
+p_forearm
+#plot all the variables ordered by importance in the forearm dataset
+p1_forearm <- ggplot(vimp_forearm, aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=45,vjust=.8, hjust=0.8)) + ggtitle("Plot of variable importance descending in the forearm dataset") +
+  xlab("Variable name") + ylab("Variable importance")
+p1_forearm
+```
+
+```{r importance_arm}
+#display the variable importance for the arm sensor
+vimp_arm <- as.data.frame(varImp(rf_arm))
+vimp_arm <- data.frame(names   = rownames(vimp_arm),overall = vimp_arm$Overall)
+vimp_arm <- vimp_arm[order(vimp_arm$overall,decreasing = T),]
+vimp_arm
+#plot ten most important variables for the arm sensor
+p_arm <- ggplot(vimp_arm[1:10,], aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=30,vjust=.8, hjust=0.8)) + ggtitle("Ten most important variables (arm sensor)") +
+  xlab("Variable name") + ylab("Variable importance")
+p_arm
+#plot all the variables ordered by importance in the arm dataset
+p1_arm <- ggplot(vimp_arm, aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=45,vjust=.8, hjust=0.8)) + ggtitle("Plot of variable importance descending in the arm dataset") +
+  xlab("Variable name") + ylab("Variable importance")
+p1_arm
+```
+
+```{r importance_belt}
+#display the variable importance for the belt sensor
+vimp_belt <- as.data.frame(varImp(rf_belt))
+vimp_belt <- data.frame(names   = rownames(vimp_belt),overall = vimp_belt$Overall)
+vimp_belt <- vimp_belt[order(vimp_belt$overall,decreasing = T),]
+vimp_belt
+#plot ten most important variables for the belt sensor
+p_belt <- ggplot(vimp_belt[1:10,], aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=30,vjust=.8, hjust=0.8)) + ggtitle("Ten most important variables (belt sensor)") +
+  xlab("Variable name") + ylab("Variable importance")
+p_belt
+#plot all the variables ordered by importance in the belt dataset
+p1_belt <- ggplot(vimp_belt, aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=45,vjust=.8, hjust=0.8)) + ggtitle("Plot of variable importance descending in the belt dataset") +
+  xlab("Variable name") + ylab("Variable importance")
+p1_belt
+```
+
+```{r importance_dumbbell}
+#display the variable importance for the dumbbell sensor
+vimp_dumbbell <- as.data.frame(varImp(rf_dumbbell))
+vimp_dumbbell <- data.frame(names   = rownames(vimp_dumbbell),overall = vimp_dumbbell$Overall)
+vimp_dumbbell <- vimp_dumbbell[order(vimp_dumbbell$overall,decreasing = T),]
+vimp_dumbbell
+#plot ten most important variables for the dumbbell sensor
+p_dumbbell <- ggplot(vimp_dumbbell[1:10,], aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=30,vjust=.8, hjust=0.8)) + ggtitle("Ten most important variables (dumbbell sensor)") +
+  xlab("Variable name") + ylab("Variable importance")
+p_dumbbell
+#plot all the variables ordered by importance in the dumbbell dataset
+p1_dumbbell <- ggplot(vimp_dumbbell, aes(x = reorder(names, -overall), y = overall)) +
+         geom_bar(stat = "identity") + theme(axis.text.x=element_text(angle=45,vjust=.8, hjust=0.8)) + ggtitle("Plot of variable importance descending in the dumbbell dataset") +
+  xlab("Variable name") + ylab("Variable importance")
+p1_dumbbell
+```
+
+## Testing
+
+```{r testing}
+#test the model on the test dataset
+pred_test <- predict(rf, test)
+cm <- confusionMatrix(pred_test, test$classe)
+cm
+```
+
+We then tested the full prediction model on the full test dataset. The model predicted the value of dependent variable with very high accuracy of `r cm$overall['Accuracy']`. The algorithm was able to classify almost all observations to the correct categories. The plot below demonstrates observations from the test dataset, correctly and incorrectly classified into categories.
+
+```{r testing_4sensors}
+#test the model on the test datasets for each sensors
+pred_test_forearm <- predict(rf_forearm, forearm_test)
+cm_forearm <- confusionMatrix(pred_test_forearm, forearm_test$classe)
+cm_forearm
+
+pred_test_arm <- predict(rf_arm, arm_test)
+cm_arm <- confusionMatrix(pred_test_arm, arm_test$classe)
+cm_arm
+
+pred_test_belt <- predict(rf_belt, belt_test)
+cm_belt <- confusionMatrix(pred_test_belt, belt_test$classe)
+cm_belt
+
+pred_test_dumbbell <- predict(rf_dumbbell, dumbbell_test)
+cm_dumbbell <- confusionMatrix(pred_test_dumbbell, dumbbell_test$classe)
+cm_dumbbell
+```
+
+We then tested all four algorithms associated with the separate sensors on the respective test datasets. The models predicted the values of the dependent variable with the accuracy of `r cm_belt$overall['Accuracy']` (belt), `r cm_forearm$overall['Accuracy']` (forearm), `r cm_dumbbell$overall['Accuracy']` (dumbbell) and `r cm_arm$overall['Accuracy']` (arm).  
+The algorithms were able to classify most observations to the correct categories. The plots below demonstrate observations from the general test dataset and four test datasets associated with single sensors, correctly and incorrectly classified into categories.
+
+```{r plotfit}
+#plot actual vs. predicted datapoints
+test$Prediction <- pred_test==test$classe
+accurate_pred_full <- test$Prediction
+ggplot(aes(x=test$classe, y = pred_test,colour=test$Prediction), data = test) + geom_jitter(size=0.8,alpha=0.8,width = 0.3, height = 0.3) + ggtitle("Actual and predicted values") +
+  xlab("Actual category") + ylab("Predicted category")
+```
+
+When all sensors were used for predictions, only few datapoints fell outside the correct categories. As we can see, the random forest algorithm correctly classified almost all observations.
+
+```{r plotfit_4}
+#plot actual vs. predicted datapoints for the forearm dataset
+forearm_test$Prediction <- pred_test_forearm==forearm_test$classe
+accurate_pred_forearm <- forearm_test$Prediction
+ggplot(aes(x=forearm_test$classe, y = pred_test_forearm,colour=forearm_test$Prediction), data = forearm_test) + geom_jitter(size=0.8,alpha=0.8,width = 0.3, height = 0.3) + ggtitle("Actual and predicted values in the forearm dataset") +
+  xlab("Actual category") + ylab("Predicted category")
+
+#plot actual vs. predicted datapoints for the arm dataset
+arm_test$Prediction <- pred_test_arm==arm_test$classe
+accurate_pred_arm <- arm_test$Prediction
+ggplot(aes(x=arm_test$classe, y = pred_test_arm,colour=arm_test$Prediction), data = arm_test) + geom_jitter(size=0.8,alpha=0.8,width = 0.3, height = 0.3) + ggtitle("Actual and predicted values in the arm dataset") +
+  xlab("Actual category") + ylab("Predicted category")
+
+#plot actual vs. predicted datapoints for the belt dataset
+belt_test$Prediction <- pred_test_belt==belt_test$classe
+accurate_pred_belt <- belt_test$Prediction
+ggplot(aes(x=belt_test$classe, y = pred_test_belt,colour=belt_test$Prediction), data = belt_test) + geom_jitter(size=0.8,alpha=0.8,width = 0.3, height = 0.3) + ggtitle("Actual and predicted values in the belt dataset") +
+  xlab("Actual category") + ylab("Predicted category")
+
+#plot actual vs. predicted datapoints for the dumbbell dataset
+dumbbell_test$Prediction <- pred_test_dumbbell==dumbbell_test$classe
+accurate_pred_dumbbell <- dumbbell_test$Prediction
+ggplot(aes(x=dumbbell_test$classe, y = pred_test_dumbbell,colour=dumbbell_test$Prediction), data = dumbbell_test) + geom_jitter(size=0.8,alpha=0.8,width = 0.3, height = 0.3) + ggtitle("Actual and predicted values in the dumbbell dataset") +
+  xlab("Actual category") + ylab("Predicted category")
+```
+
+For separate sensors, most datapoints are correctly clasified, however a considerable number falls outside the correct categories.  
+
+Now we save test classes and predictions into a separate dataset to be used in a Shiny application.  
+
+```{r save}
+data_plot <- data.frame(testclass = test$classe, accurate_pred_full, pred_test_full = pred_test, accurate_pred_forearm, pred_test_forearm, accurate_pred_arm, pred_test_arm, accurate_pred_belt, pred_test_belt, accurate_pred_dumbbell, pred_test_dumbbell)
+
+save(data_plot, file = "data_plot.RData")
+```
+
+## Summary  
+The random forest procedure performed on the readings from movement sensors allowed for very accurate classification of almost all observations in the test dataset into the correct categories.  
+Limiting observations to single movement sensors reduces the accuracy of predictions. Among the sensors, the one placed on the athlete's wrist corresponds to the way smartwatches / activity trackers are worn. The study demonstrates that a single sensor is still able to provide relatively high accuracy of predictions, however a potential automatic feedback feature might provide erroneous tips for the user.
+
+
+##References
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
